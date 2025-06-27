@@ -1,0 +1,251 @@
+---
+title: "HDI vs Life Expectancy Dashboard"
+format: dashboard
+---
+
+```{python}
+#| label: setup
+#| include: false
+import pandas as pd
+import numpy as np
+import re
+import plotly.express as px
+import plotly.graph_objects as go
+from itables import init_notebook_mode
+init_notebook_mode(all_interactive=True)
+
+def load_and_clean_data():
+    # Load datasets (replace with your actual file paths)
+    hdi = pd.read_csv("hdi.csv") 
+    lex = pd.read_csv("lex.csv")
+    pop = pd.read_csv("pop.csv").dropna()
+    
+    # Standardize column names
+    pop.columns = pop.columns.str.replace(r'pop(ulation)?', 'population', regex=True, flags=re.IGNORECASE)
+    
+    # Merge datasets
+    df = (hdi.merge(lex, on="country", suffixes=('_hdi', '_life'))
+          .merge(pop, on="country"))
+    
+    # Select relevant columns (2001-2010)
+    year_cols = [c for c in df.columns if any(str(y) in c for y in range(2001, 2011))]
+    keep_cols = ['country'] + [c for c in year_cols 
+               if any(kw in c.lower() for kw in ['hdi','life','population'])]
+    
+    # Melt and reshape
+    long_df = (df[keep_cols]
+               .melt(id_vars='country', var_name='metric_year', value_name='value')
+               .assign(
+                   metric=lambda x: x['metric_year'].str.extract(r'(hdi|life|population)', flags=re.IGNORECASE)[0],
+                   year=lambda x: x['metric_year'].str.extract(r'(\d{4})')[0].astype(int)
+               )
+               .pivot_table(
+                   index=['country','year'], 
+                   columns='metric', 
+                   values='value',
+                   aggfunc='first'
+               )
+               .reset_index()
+               .rename_axis(None, axis=1))
+    
+    # Ensure expected columns exist
+    expected_cols = ['hdi', 'life', 'population']
+    for col in expected_cols:
+        if col not in long_df.columns:
+            long_df[col] = np.nan
+    return long_df.dropna(subset=['hdi', 'life'])
+
+# Load data 
+df = load_and_clean_data()
+latest_year = df['year'].max()
+
+# Compute statistics
+highest_row = df.sort_values("hdi", ascending=False).head(1).squeeze()
+highest_hdi_country = highest_row["country"]
+highest_hdi_value = round(highest_row["hdi"], 2)
+
+lowest_row = df.sort_values("hdi", ascending=True).head(1).squeeze()
+lowest_hdi_country = lowest_row["country"]
+lowest_hdi_value = round(lowest_row["hdi"], 2)
+
+average_hdi = round(df["hdi"].mean(), 2)
+average_hdi_str = str(average_hdi)
+
+# Life expectancy stats
+latest_data = df[df['year'] == latest_year]
+highest_life = latest_data.nlargest(1, 'life').iloc[0]
+lowest_life = latest_data.nsmallest(1, 'life').iloc[0]
+average_life = round((latest_data['life'] * latest_data['population']).sum() / latest_data['population'].sum(), 1)
+
+```
+
+# HDI Indicators
+## Row 1 {height=15%}
+::: {.valuebox icon="trophy" color="#1E90FF" title="Highest HDI"}
+`{python} f"{highest_hdi_value} ({highest_hdi_country})"`
+:::
+
+::: {.valuebox icon="arrow-down" color="#87CEFA" title="Lowest HDI"} 
+`{python} f"{lowest_hdi_value} ({lowest_hdi_country})"`
+:::
+
+::: {.valuebox icon="calculator" color="#4682B4" title="Global average"}
+`{python} average_hdi_str`
+
+:::
+
+
+## Row 2 {height=60%}
+### {width=60%}
+:::
+
+
+```{python}
+#| label: hdi-map
+#| fig-cap: "World HDI Distribution"
+map_fig = px.choropleth(
+    df[df['year'] == latest_year],
+    locations="country",
+    locationmode="country names",
+    color="hdi",
+    hover_name="country",
+    color_continuous_scale="Oranges",
+    range_color=[df['hdi'].min(), df['hdi'].max()],
+    projection="natural earth",
+    labels={'hdi': 'HDI Score'},
+    height=500
+).update_layout(
+    margin={"r":0,"t":40,"l":0,"b":0},
+    geo=dict(showframe=False, showcoastlines=True)
+)
+map_fig
+```
+
+### {width=40%}
+
+```{python}
+#| label: hdi-table
+#| fig-cap: "HDI Comparison: Top 3 vs Bottom 3 Countries"
+avg_hdi = df.groupby('country')['hdi'].mean().sort_values(ascending=False)
+selected_countries = avg_hdi.head(3).index.tolist() + avg_hdi.tail(3).index.tolist()
+filtered_df = df[df['country'].isin(selected_countries)]
+
+styled_table = (
+    filtered_df.groupby('country')
+    .agg(
+        Avg_HDI=('hdi', 'mean'),
+        Start_HDI=('hdi', 'first'),
+        End_HDI=('hdi', 'last'),
+        Improvement=('hdi', lambda x: round(x.iloc[-1] - x.iloc[0], 3))
+    )
+    .round(3)
+    .sort_values('Avg_HDI', ascending=False)
+    .style
+    .background_gradient(subset=['Improvement'], cmap='Oranges')
+    .set_properties(**{'text-align': 'center'})
+)
+styled_table
+```
+
+# Life Expectancy Analysis
+## Row 1 {height=40%}
+## {width=30%}
+
+```{python}
+#| label: life-trends
+#| fig-cap: "Life Expectancy Trends (2001-2010)"
+selected_countries = ['Australia', 'Afghanistan', 'Botswana', 'Brazil', 'Bahrain', 'Belarus']
+life_fig = px.line(
+    df[df['country'].isin(selected_countries)],
+    x='year',
+    y='life',
+    color='country',
+    markers=True,
+    height=400
+).update_layout(hovermode='x unified')
+life_fig
+```
+
+### {width=50%}
+
+```{python}
+#| label: life-bars
+#| fig-cap: "Life Expectancy in Most Populous Countries"
+top_10 = df[df['year'] == latest_year].nlargest(10, 'population')
+bar_fig = px.bar(
+    top_10,
+    x='life',
+    y='country',
+    color='life',
+    color_continuous_scale='Oranges',
+    orientation='h',
+    height=400
+).update_layout(yaxis={'categoryorder':'total ascending'})
+bar_fig
+```
+
+# HDI vs Life Expectancy
+
+## {width=60%}
+```{python}
+
+#| label: hdi-life-scatter
+#| fig-cap: "HDI vs Life Expectancy Correlation"
+
+# Country selection with meaningful annotations
+selected_countries = [
+    'Norway', 'Japan', 'United States', 'Brazil', 
+    'South Africa', 'India', 'Rwanda', 'Botswana', 'Haiti'
+]
+
+plot_df = df[df['country'].isin(selected_countries)]
+
+# Create the visualization
+# Create main figure with ONLY selected countries
+# Create figure with animation + trendline (all in one step)
+fig = px.scatter(
+    plot_df,
+    x='hdi',
+    y='life',
+    color='country',
+    animation_frame='year',
+    animation_group='country',
+    range_x=[0.2, 1],
+    range_y=[40, 90],
+    height=500,
+    labels={'hdi': 'HDI', 'life': 'Life Expectancy'},
+    title='HDI vs Life Expectancy',
+    trendline="lowess"  # Correctly integrated trendline
+)
+
+# Make trendline more visible
+fig = fig.update_traces(
+    line=dict(color='black', width=3),
+    selector={"name": "trendline"}
+)
+
+# Ensure all frames have trendline
+fig = fig.update_layout(showlegend=True)
+
+
+# Show the final plot
+fig.show()
+```
+
+
+# Summary 
+
+Our analysis of Human Development Index (HDI) and life expectancy across multiple countries reveals a strong positive correlation:
+
+Higher HDI (reflecting better health, education, and income) is linked to longer life expectancy.
+
+The scatter plot visualization provides compelling evidence of the strong positive correlation between HDI and life expectancy.
+
+**Implications**
+Policy focus: Improving healthcare, education, and economic conditions (HDI components) can extend lifespans.
+
+Global disparities: Low-HDI nations lag significantly in longevity, highlighting inequities.
+
+**Recommendation**
+Prioritize HDI-driven interventions (e.g., universal healthcare, education access) to enhance life expectancy
+
